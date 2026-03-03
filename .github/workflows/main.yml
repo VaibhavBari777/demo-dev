@@ -29,7 +29,7 @@ jobs:
 
       - name: Tag Image
         run: |
-          docker tag demo-dev:latest 869697964995.dkr.ecr.ap-south-1.amazonaws.com/demo-dev:latest
+          docker tag demo-dev:latest 869697964995.dkr.ecr.us-east-1.amazonaws.com/demo-dev:latest
 
       - name: Push Image
         run: |
