@@ -8,17 +8,16 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
+      
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1   # ✅ MATCH REGION
+          aws-region: us-east-1
 
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -30,6 +29,33 @@ jobs:
         run: |
           docker tag demo-dev:latest 869697964995.dkr.ecr.us-east-1.amazonaws.com/demo-dev:latest
 
-      - name: Push Image
+      - name: Push Image to ECR
         run: |
           docker push 869697964995.dkr.ecr.us-east-1.amazonaws.com/demo-dev:latest
+
+      - name: Update ECS Task Definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition demo-dev \
+            --region us-east-1 | jq '.taskDefinition' > task-definition.json
+          
+          NEW_TASK_DEF=$(aws ecs register-task-definition \
+            --cli-input-json file://task-definition.json \
+            --region us-east-1 | jq '.taskDefinition.taskDefinitionArn')
+          
+          echo "New task definition: $NEW_TASK_DEF"
+
+      - name: Update ECS Service with Force Deployment
+        run: |
+          aws ecs update-service \
+            --cluster demo-dev \
+            --service demo-dev \
+            --force-new-deployment \
+            --region us-east-1
+
+      - name: Wait for Service to Stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster demo-dev \
+            --services demo-dev \
+            --region us-east-1
