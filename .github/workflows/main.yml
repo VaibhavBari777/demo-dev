@@ -8,10 +8,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-      
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -35,27 +36,94 @@ jobs:
 
       - name: Update ECS Task Definition
         run: |
+          # Get current task definition and clean it for re-registration
           aws ecs describe-task-definition \
             --task-definition demo-dev \
-            --region us-east-1 | jq '.taskDefinition' > task-definition.json
-          
-          NEW_TASK_DEF=$(aws ecs register-task-definition \
-            --cli-input-json file://task-definition.json \
-            --region us-east-1 | jq '.taskDefinition.taskDefinitionArn')
-          
-          echo "New task definition: $NEW_TASK_DEF"
+            --region us-east-1 \
+            --query 'taskDefinition' | jq 'del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )' > task-definition.json
 
-      - name: Update ECS Service with Force Deployment
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://task-definition.json \
+            --region us-east-1 \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "New task definition ARN: $NEW_TASK_DEF_ARN"
+          echo "NEW_TASK_DEF_ARN=$NEW_TASK_DEF_ARN" >> $GITHUB_ENV
+
+      - name: Update ECS Service with New Task Definition
         run: |
           aws ecs update-service \
             --cluster demo-dev \
             --service demo-dev \
+            --task-definition $NEW_TASK_DEF_ARN \
             --force-new-deployment \
             --region us-east-1
+          echo "✅ ECS Service update triggered"
 
       - name: Wait for Service to Stabilize
         run: |
-          aws ecs wait services-stable \
+          echo "Waiting for ECS service to stabilize..."
+          MAX_ATTEMPTS=60
+          ATTEMPT=0
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+
+            STATUS=$(aws ecs describe-services \
+              --cluster demo-dev \
+              --services demo-dev \
+              --region us-east-1 \
+              --query 'services[0].deployments[0].rolloutState' \
+              --output text)
+
+            RUNNING=$(aws ecs describe-services \
+              --cluster demo-dev \
+              --services demo-dev \
+              --region us-east-1 \
+              --query 'services[0].runningCount' \
+              --output text)
+
+            DESIRED=$(aws ecs describe-services \
+              --cluster demo-dev \
+              --services demo-dev \
+              --region us-east-1 \
+              --query 'services[0].desiredCount' \
+              --output text)
+
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS | Rollout: $STATUS | Running: $RUNNING/$DESIRED"
+
+            if [ "$STATUS" = "COMPLETED" ]; then
+              echo "✅ Deployment successful! Running: $RUNNING/$DESIRED"
+              exit 0
+            elif [ "$STATUS" = "FAILED" ]; then
+              echo "❌ Deployment FAILED!"
+              # Print last 5 service events for debugging
+              aws ecs describe-services \
+                --cluster demo-dev \
+                --services demo-dev \
+                --region us-east-1 \
+                --query 'services[0].events[:5]' \
+                --output table
+              exit 1
+            fi
+
+            sleep 15
+          done
+
+          echo "⚠️ Timeout after 15 minutes - service did not stabilize"
+          aws ecs describe-services \
             --cluster demo-dev \
             --services demo-dev \
-            --region us-east-1
+            --region us-east-1 \
+            --query 'services[0].events[:5]' \
+            --output table
+          exit 1
